@@ -14,6 +14,7 @@ import osmnx as ox
 from land_grab.checks import Problem, validate_route
 from land_grab.coverage import DEFAULT_MIN_DEPTH_M, hexes_for_track, risky_hexes
 from land_grab.export import save_gpx
+from land_grab.browser_streets import PHONE_FAILED_MESSAGE
 from land_grab.geo import postcode_to_latlon
 from land_grab.hexgrid import parse_cells
 from land_grab.mapview import draw_map, route_to_latlons
@@ -30,6 +31,7 @@ STAGE_POSTCODE = "Finding your postcode"
 STAGE_STREETS = "Loading the streets"
 STAGE_BUSY = BUSY_MESSAGE  # shown while a busy map server is retried
 STAGE_FIRST_TIME = FIRST_TIME_MESSAGE  # shown before a slow download of streets no ready-made file covers
+STAGE_PHONE_FAILED = PHONE_FAILED_MESSAGE  # shown when the phone's download did not work and our server takes over
 
 
 class InvalidPostcodeError(ValueError):
@@ -100,6 +102,8 @@ def plan_loop(
     on_status: Callable[[str], None] | None = None,
     planner_only: bool = False,
     on_stage: Callable[[str], None] | None = None,
+    ask_phone: bool = False,
+    phone_reply: dict | None = None,
 ) -> PlannedLoop:
     """Plan a loop of ``km`` km from a postcode.
 
@@ -116,6 +120,11 @@ def plan_loop(
     for an empty or unknown postcode, InvalidCellError for bad cell IDs, ValueError for other bad arguments,
     LoopNotFoundError if no route is found, and requests.RequestException if
     the postcode service cannot be reached.
+
+    ``ask_phone`` (the web app) makes this raise ``NeedPhoneStreets`` when no saved or ready-made file
+    covers the place, so the page can have the visitor's phone download the streets; the planning is then
+    run again with the phone's answer as ``phone_reply`` (see ``network.get_network``). The command line
+    uses neither and downloads on this computer, as before.
     """
     say = on_status or (lambda message: None)
     stage = on_stage or (lambda name: None)
@@ -143,7 +152,16 @@ def plan_loop(
         say(STAGE_FIRST_TIME)
         stage(STAGE_FIRST_TIME)
 
-    graph = get_network(lat, lon, activity, radius_m, on_busy=busy, on_notice=say, on_slow=first_time)
+    def phone_failed(reason: str) -> None:
+        say(f"{STAGE_PHONE_FAILED} ({reason})")
+        stage(STAGE_PHONE_FAILED)
+
+    extra = {}  # only passed when used, so the command line calls get_network exactly as before
+    if ask_phone:
+        extra["ask_phone"] = True
+    if phone_reply is not None:
+        extra.update(phone_reply=phone_reply, on_phone_failed=phone_failed)
+    graph = get_network(lat, lon, activity, radius_m, on_busy=busy, on_notice=say, on_slow=first_time, **extra)
     start_node = ox.distance.nearest_nodes(graph, X=lon, Y=lat)
 
     options = dict(

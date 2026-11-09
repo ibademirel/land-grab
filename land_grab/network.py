@@ -2,8 +2,8 @@
 
 ``get_network`` looks for the streets in this order: the local pickle cache, then a ready-made file in
 ``prebuilt/`` that covers the request (made by ``scripts/build_street_cache.py``), then the same kind of
-file downloaded from the project's GitHub Release (``RELEASE_FILES``), and only then the public
-Overpass servers.
+file downloaded from the project's GitHub Release (``RELEASE_FILES``), then (web app only) the visitor's
+own phone or browser, and last the public Overpass servers from our own server.
 """
 
 import gzip
@@ -524,6 +524,9 @@ def get_network(
     on_notice: Callable[[str], None] | None = None,
     release_files: tuple[ReleaseFile, ...] | None = None,
     on_slow: Callable[[], None] | None = None,
+    ask_phone: bool = False,
+    phone_reply: dict | None = None,
+    on_phone_failed: Callable[[str], None] | None = None,
 ) -> nx.MultiDiGraph:
     """Return the walk/bike street network around a point, without motorways or trunk roads.
 
@@ -536,7 +539,12 @@ def get_network(
     3. the same kind of file downloaded from the project's GitHub Release into ``prebuilt_dir``
        (``fetch_release_files``; ``release_files`` replaces the list of published files, mainly for tests);
        if that fails the next step takes over;
-    4. a live download (``download_graph``), which can take minutes: ``on_slow`` is called just before it
+    4. the visitor's own phone or browser (web app only, see ``browser_streets``): with ``ask_phone`` the
+       function stops here by raising ``NeedPhoneStreets``, whose request the page hands to the phone.
+       The phone's answer comes back as ``phone_reply`` on the next call, is checked and turned into the
+       streets, and saved like a download. If the answer is unusable, ``on_phone_failed`` hears why and
+       the next step takes over;
+    5. a live download (``download_graph``), which can take minutes: ``on_slow`` is called just before it
        starts, and only then (never when a saved or ready-made file was used): a busy map server is retried and other servers are tried,
        with ``on_busy`` called before each wait. A failed download is never saved: the file is only
        written once the streets have arrived, so the next attempt starts fresh.
@@ -557,9 +565,25 @@ def get_network(
         if attempt == 0 and not fetch_release_files(lat, lon, activity, radius_m, save_folder, release_files, on_notice):
             break
 
-    if on_slow:
-        on_slow()  # nothing saved or ready-made covers this place: warn that the next part is slow
-    graph = download_graph(lat, lon, network_type, radius_m, on_busy)
+    graph = None
+    if phone_reply is not None:
+        from land_grab.browser_streets import PhoneStreetsError, graph_from_reply
+
+        try:
+            graph = graph_from_reply(phone_reply, lat, lon, network_type, radius_m)
+        except PhoneStreetsError as error:
+            log.warning("Streets from the phone were not usable: %s", error)
+            if on_phone_failed:
+                on_phone_failed(str(error))
+    elif ask_phone:
+        from land_grab.browser_streets import NeedPhoneStreets, build_request
+
+        raise NeedPhoneStreets(build_request(lat, lon, network_type, radius_m))
+
+    if graph is None:
+        if on_slow:
+            on_slow()  # nothing saved or ready-made covers this place: warn that the next part is slow
+        graph = download_graph(lat, lon, network_type, radius_m, on_busy)
     graph = remove_excluded_roads(graph)
 
     path.parent.mkdir(parents=True, exist_ok=True)

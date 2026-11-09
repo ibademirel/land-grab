@@ -14,11 +14,13 @@ import requests
 from osmnx._errors import InsufficientResponseError, ResponseStatusCodeError
 
 from land_grab import pipeline
+from land_grab.browser_streets import NeedPhoneStreets  # noqa: F401  (app.py imports it from here)
 from land_grab.hexgrid import RESOLUTION, InvalidCellError, hexes_within_radius, is_valid_hex, parse_cells
 from land_grab.network import MapServiceBusyError
 from land_grab.pipeline import (  # noqa: F401  (app.py imports the STAGE_ names from here)
     STAGE_BUSY,
     STAGE_FIRST_TIME,
+    STAGE_PHONE_FAILED,
     InvalidPostcodeError,
     PlannedLoop,
 )
@@ -172,6 +174,8 @@ def get_route(
     *,
     on_stage: Callable[[str], None] | None = None,
     cache: RouteCache | None = None,
+    ask_phone: bool = False,
+    phone_reply: dict | None = None,
 ) -> tuple[RouteResult, bool]:
     """Return (route, came_from_cache) for a postcode, distance, activity and claimed cells.
 
@@ -182,6 +186,10 @@ def get_route(
     (see ``pipeline.plan_loop``, ``planner_only``; the random search is only a
     fallback for routes of 12 km or less), ``on_stage`` hears about each step,
     and the finished route is cached. Failures are never cached.
+
+    ``ask_phone`` lets the visitor's phone download streets that no ready-made file covers: then this raises
+    ``NeedPhoneStreets`` (not an error; the page hands its request to the phone) and is called again with
+    the phone's answer as ``phone_reply``. See ``network.get_network``.
 
     Raises TooFarError for a distance over ``MAX_KM`` (web only; the command line is unlimited),
     and otherwise what ``plan_loop`` raises; ``friendly_error`` turns that into words.
@@ -195,7 +203,14 @@ def get_route(
 
     began = time.perf_counter()
     loop = pipeline.plan_loop(
-        postcode, float(km), activity.strip().lower(), claimed=key[3], planner_only=True, on_stage=on_stage
+        postcode,
+        float(km),
+        activity.strip().lower(),
+        claimed=key[3],
+        planner_only=True,
+        on_stage=on_stage,
+        ask_phone=ask_phone,
+        phone_reply=phone_reply,
     )
     if on_stage:
         on_stage(STAGE_MAP)

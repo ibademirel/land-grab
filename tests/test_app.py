@@ -372,3 +372,54 @@ def test_an_area_with_a_ready_made_file_shows_no_first_time_message(stubbed):
     at = _plan(_app())
     steps = " ".join(str(w.value) for w in at.status[0].markdown)
     assert "First time planning" not in steps
+
+
+# --- the phone downloads the streets -----------------------------------------------------------
+
+from land_grab.browser_streets import PHONE_FAILED_MESSAGE, PHONE_PROGRESS_MESSAGE, NeedPhoneStreets, build_request  # noqa: E402
+
+
+@pytest.fixture
+def phone_needed(monkeypatch):
+    """No file covers the place: the first call asks for the phone, the next one (with its reply) gets the streets."""
+    graph = _grid()
+    seen = []
+
+    def get_network(lat, lon, activity, radius_m, *, ask_phone=False, phone_reply=None, **kwargs):
+        seen.append({"ask_phone": ask_phone, "phone_reply": phone_reply})
+        if ask_phone and phone_reply is None:
+            raise NeedPhoneStreets(build_request(lat, lon, "walk", 600.0))
+        return graph
+
+    monkeypatch.setattr(pipeline, "postcode_to_latlon", lambda postcode: (_LAT, _LON))
+    monkeypatch.setattr(pipeline, "get_network", get_network)
+    monkeypatch.setattr(pipeline.ox.distance, "nearest_nodes", lambda graph, X, Y: (2, 1))
+    return seen
+
+
+def test_when_the_phone_is_needed_the_page_says_it_is_downloading(phone_needed):
+    at = _plan(_app())
+    assert not at.exception and not at.error and not at.metric
+    assert PHONE_PROGRESS_MESSAGE in [i.value for i in at.info]
+    assert phone_needed == [{"ask_phone": True, "phone_reply": None}]
+    assert "pending" in at.session_state
+
+
+def test_a_new_search_replaces_a_pending_phone_download(phone_needed):
+    at = _plan(_app())
+    first = at.session_state["pending"][0].request_id
+    at = _plan(at, postcode="SW1A 2AA")
+    assert at.session_state["pending"][0].request_id != first
+
+
+def test_the_phone_switch_can_turn_the_phone_download_off(phone_needed, monkeypatch):
+    monkeypatch.setenv("LAND_GRAB_PHONE_DOWNLOAD", "0")
+    at = _plan(_app())
+    assert phone_needed[0]["ask_phone"] is False
+    assert PHONE_PROGRESS_MESSAGE not in [i.value for i in at.info]
+
+
+def test_the_phone_component_is_registered_once_in_its_own_module():
+    source = (ROOT / "app.py").read_text()
+    assert "components.v2.component" not in source
+    assert "components.v2.component" in (ROOT / "land_grab" / "phone_component.py").read_text()

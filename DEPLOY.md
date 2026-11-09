@@ -88,3 +88,26 @@ To publish or update them:
 
 If you build new files with different streets (a new filter, say), publish them under a new tag such as
 `streets-v2` and change the link in `land_grab/network.py`. Files made with an older filter are ignored.
+
+## Streets downloaded by the visitor's phone
+
+The free Streamlit server is often refused by the public Overpass map servers ("map service busy"). A phone on its
+own connection usually is not, so the app now lets **the visitor's phone or browser download the streets**.
+
+The order for a place is: saved copy on the server → ready-made file (`prebuilt/`, then the Release) → **the phone
+downloads it** → the server downloads it (last resort). The page shows "Downloading streets to your phone… keep
+this page open." with a "N MB so far" counter. If the phone cannot do it, it says "Your phone couldn't download
+the street map. Trying our server instead…" and the server tries. If that fails too you see the usual "map
+service is busy" message.
+
+- The phone only receives the question text that Python wrote, so the area and the street filter are exactly the
+  same as the server download. The answer is shrunk and compressed, then checked by Python before it is used.
+  The result is saved on the server, so the same place is instant afterwards for everyone.
+- To switch it off (the server downloads straight away, as before), set the environment variable
+  `LAND_GRAB_PHONE_DOWNLOAD=0` (on Streamlit Cloud: app → Settings → Secrets / environment).
+- The command line never uses it.
+- Streamlit refuses messages from the browser over 25 MB. The phone's answer is kept under about 24 MB; a bigger
+  area fails with "too big to send from a phone" and falls back to the server.
+- Rides stay limited to 15 km on the web (`MAX_KM` in `land_grab/web.py`). A 30 km ride needs a street map of about
+  960 km², which does not fit in the free server's ~1 GB of memory.
+- Tests for the browser half: `node --test tests/js/phone_streets.test.mjs` (also run by `pytest`).

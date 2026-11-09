@@ -6,13 +6,19 @@ This file is only the screen. The work (planner-only routing, the cache of
 finished routes, the plain-English errors) is in ``land_grab/web.py``.
 """
 
+import os
+
 import streamlit as st
 
+from land_grab.browser_streets import PHONE_PROGRESS_MESSAGE
+from land_grab.phone_component import ask_phone
 from land_grab.web import (
     ACTIVITIES,
     MAX_KM,
     STAGE_BUSY,
     STAGE_FIRST_TIME,
+    STAGE_PHONE_FAILED,
+    NeedPhoneStreets,
     cells_from_block,
     cells_outside_area,
     details_text,
@@ -24,6 +30,9 @@ from land_grab.web import (
 ACTIVITY_LABELS = {"run": "🏃 Run", "walk": "🚶 Walk", "ride": "🚴 Ride"}
 NOTHING_FOUND = "I couldn't find any cell IDs in that text. Check you copied the whole page block."
 OUTSIDE_NOTE = "Some claimed cells are outside this area, so they won't affect this route."
+# Streets no ready-made file covers are downloaded by the visitor's own phone first (the cloud server is often
+# refused by the map servers). Set the environment variable LAND_GRAB_PHONE_DOWNLOAD=0 to switch that off.
+PHONE_DOWNLOAD = os.environ.get("LAND_GRAB_PHONE_DOWNLOAD", "1").strip() != "0"
 MAP_HEIGHT_PX = 560  # the CSS below makes it taller on big screens and keeps it on-screen on phones
 
 CSS = """
@@ -86,27 +95,44 @@ def show_error(error: Exception, postcode: str) -> None:
         st.code(f"{type(error).__name__}: {error}")
 
 
-def plan(postcode: str, km: float, activity: str, claimed: str = "") -> None:
-    """Make (or fetch) the route, showing each step, and keep the result for the next rerun."""
+def plan(postcode: str, km: float, activity: str, claimed: str = "", phone_reply: dict | None = None) -> None:
+    """Make (or fetch) the route, showing each step, and keep the result for the next rerun.
+
+    If the streets are not saved or ready-made, the phone is asked to download them (``pending``), and this is
+    called again, with its answer as ``phone_reply``, when the answer arrives.
+    """
     st.session_state.pop("result", None)
-    with st.status("Getting started", expanded=True) as status:
+    st.session_state.pop("pending", None)
+    holder = st.empty()
+    needs_phone = False
+    with holder.container(), st.status("Getting started", expanded=True) as status:
 
         def stage(name: str) -> None:
             status.update(label=name)
             # A retry, or a warning that a slow part is coming, is not a finished step: no tick.
-            st.write(f"⏳ {name}" if name == STAGE_BUSY else f"ℹ️ {name}" if name == STAGE_FIRST_TIME else f"✔ {name}")
+            warned = name in (STAGE_FIRST_TIME, STAGE_PHONE_FAILED)
+            st.write(f"⏳ {name}" if name == STAGE_BUSY else f"ℹ️ {name}" if warned else f"✔ {name}")
 
         try:
-            result, from_cache = get_route(postcode, km, activity, claimed, on_stage=stage)
+            result, from_cache = get_route(
+                postcode, km, activity, claimed, on_stage=stage, ask_phone=PHONE_DOWNLOAD, phone_reply=phone_reply
+            )
+        except NeedPhoneStreets as need:
+            st.session_state["pending"] = (need.request, (postcode, km, activity, claimed))
+            needs_phone = True
         except Exception as error:  # every failure becomes a friendly message, never a traceback
             status.update(label="That didn't work", state="error", expanded=False)
             st.session_state["error"] = (error, postcode)
             return
-        status.update(
-            label="Here it is, straight from your earlier search" if from_cache else "Your route is ready",
-            state="complete",
-            expanded=False,
-        )
+        else:
+            status.update(
+                label="Here it is, straight from your earlier search" if from_cache else "Your route is ready",
+                state="complete",
+                expanded=False,
+            )
+    if needs_phone:
+        holder.empty()  # the phone's own progress line takes the place of this box
+        return
     st.session_state.pop("error", None)
     st.session_state["result"] = (result, from_cache)
 
@@ -172,6 +198,15 @@ if submitted:
 if "found_note" in st.session_state:
     kind, message = st.session_state["found_note"]
     getattr(found_note, kind)(message)
+
+if "pending" in st.session_state:
+    request, asked = st.session_state["pending"]
+    phone_note = st.empty()
+    phone_note.info(PHONE_PROGRESS_MESSAGE, icon="📱")
+    reply = ask_phone(request)  # the phone downloads; its progress line is shown here
+    if reply is not None and reply.get("id") == request.request_id:
+        phone_note.empty()  # the progress box of the next step takes over
+        plan(*asked, phone_reply=reply)  # the streets have arrived (or the phone gave up): carry on
 
 if "error" in st.session_state and "result" not in st.session_state:
     show_error(*st.session_state["error"])
