@@ -59,3 +59,32 @@ The first start takes a few minutes while it installs the packages. After that, 
 - **Updating.** After changing the code, run `git add .`, `git commit -m "what changed"` and `git push`. The app
   redeploys by itself.
 - **If the app crashes with "out of memory"**, lower the numbers in `MAX_KM`.
+
+## Ready-made street files
+
+The slow part of a new area is downloading its streets from the public Overpass servers. To avoid that,
+`scripts/build_street_cache.py` makes compressed street files for central London, and the app uses one whenever
+it covers the request. The files are big, so the `prebuilt/` folder is in `.gitignore`: **they are not pushed to
+GitHub with the code.** They are published as a **GitHub Release** instead.
+
+**How the app finds streets, in order:** the local cache, then a ready-made file in `prebuilt/`, then the same file
+downloaded from the Release (saved into `prebuilt/` so it is only fetched once per server start), and only then
+the slow live download from Overpass. If the Release download fails for any reason, the app says so in plain
+words and carries on with the live download.
+
+The Release is the one named `streets-v1` on `ibademirel/land-grab`. The app expects exactly these files in it
+(the list is `RELEASE_FILES` in `land_grab/network.py`):
+
+- `london-se17-10km_run.pkl.gz`
+- `london-se17-10km_ride.pkl.gz`
+- `london-sw1a-5km_ride.pkl.gz`
+
+To publish or update them:
+
+1. On your Mac, with internet: `.venv/bin/python scripts/build_street_cache.py` (it prints each file's size).
+2. On GitHub open your repository → **Releases** → **Draft a new release**, create the tag `streets-v1`, and drag the
+   files from `prebuilt/` into it. Click **Publish release**.
+3. Nothing else to do: the app downloads them the first time somebody asks for a matching place.
+
+If you build new files with different streets (a new filter, say), publish them under a new tag such as
+`streets-v2` and change the link in `land_grab/network.py`. Files made with an older filter are ignored.

@@ -39,3 +39,6 @@ cache/
 
 # Claude Code's local settings
 .claude/
+
+# Ready-made street files (big; published as a GitHub Release instead, see DEPLOY.md)
+prebuilt/

@@ -267,7 +267,7 @@ def test_the_command_line_has_no_distance_limit():
 
 # --- a busy map server ---------------------------------------------------------------------
 
-BUSY = "The map service is busy right now. Please try again in a minute."
+BUSY = "The map service is busy right now. Please wait a minute and press Plan again."
 
 
 def test_the_overpass_502_error_says_the_map_service_is_busy_not_that_the_distance_is_wrong():
@@ -318,3 +318,89 @@ def test_the_busy_message_is_passed_on_as_a_progress_stage(monkeypatch, cache):
     get_route("SW1A 1AA", 4, "walk", cache=cache, on_stage=stages.append)
     assert "Map service is busy, trying again..." in stages
     assert stages.index("Loading the streets") < stages.index("Map service is busy, trying again...")
+
+
+# --- pasting the whole block from the challenge page -------------------------------------
+
+from land_grab.web import cells_from_block, cells_outside_area, join_claimed  # noqa: E402
+
+_C1, _C2 = sorted(neighbours(HOME_CELL))[:2]
+_OTHER = "8" + "a" * 14  # looks like a cell, but belongs to a team, not to "cells"
+
+
+def _block(cells, extra=""):
+    listed = ", ".join(f'"{c}"' for c in cells)
+    return (
+        '{"teams": [{"name": "Red", "cells": ["%s"]}], "activities": [{"id": 1, "cell": "%s"}], '
+        '"cells": [%s], "regions": ["8%s"]%s}' % (_OTHER, _OTHER, listed, "b" * 14, extra)
+    )
+
+
+def test_ids_are_picked_out_of_a_pasted_block():
+    assert cells_from_block(_block([_C1, _C2])) == [_C1, _C2]
+
+
+def test_teams_activities_and_regions_are_ignored():
+    found = cells_from_block(_block([_C1]))
+    assert found == [_C1] and _OTHER not in found and "8" + "b" * 14 not in found
+
+
+def test_repeated_ids_are_counted_once():
+    assert cells_from_block(_block([_C1, _C2, _C1, _C1.upper()])) == [_C1, _C2]
+
+
+def test_a_block_laid_out_over_many_lines_works():
+    text = f'overview = {{\n  "cells": [\n    "{_C1}",\n    "{_C2}"\n  ],\n  "teams": []\n}}'
+    assert cells_from_block(text) == [_C1, _C2]
+
+
+def test_a_block_with_nothing_usable_gives_an_empty_list():
+    for text in ["", None, "hello", '{"teams": ["8aaaaaaaaaaaaaa"]}', '{"cells": []}', '{"cells": ["banana", "12345"]}']:
+        assert cells_from_block(text) == []
+
+
+def test_the_two_boxes_feed_the_same_list():
+    both = cache_key("SW1A 1AA", 5, "run", join_claimed(_C1, _block([_C2, _C1])))
+    assert both[3] == frozenset({_C1, _C2})
+    assert join_claimed("", "") == "" and join_claimed(_C1, "") == _C1 and join_claimed("", _block([_C2])) == _C2
+
+
+def test_a_claimed_cell_far_from_the_route_is_reported_as_outside(counted, cache):
+    near = sorted(neighbours(HOME_CELL))[0]
+    loop = get_route("SW1A 1AA", 4, "walk", near, cache=cache)[0].loop
+    assert cells_outside_area(loop) == frozenset()
+
+    import h3
+
+    faraway = h3.latlng_to_cell(_LAT + 1.0, _LON, 8)  # about 110 km north
+    loop = get_route("SW1A 1AA", 4, "walk", f"{near}, {faraway}", cache=cache)[0].loop
+    assert cells_outside_area(loop) == frozenset({faraway})
+
+
+# --- the messages for a first-time area and for a busy map service -------------------------------
+
+
+def test_the_busy_failure_message_says_to_wait_and_press_plan_again():
+    from osmnx._errors import ResponseStatusCodeError
+
+    expected = "The map service is busy right now. Please wait a minute and press Plan again."
+    assert web.BUSY_FAILED_MESSAGE == expected
+    assert friendly_error(web.MapServiceBusyError(503, "https://overpass-api.de/api/interpreter")) == expected
+    assert friendly_error(ResponseStatusCodeError("502 Bad Gateway")) == expected
+
+
+def test_the_first_time_message_is_a_progress_stage_before_the_streets_load(monkeypatch, cache):
+    monkeypatch.setattr(pipeline, "postcode_to_latlon", lambda postcode: (_LAT, _LON))
+    graph = _grid()
+
+    def slow_area(lat, lon, activity, radius_m, on_slow=None, **kwargs):
+        on_slow()  # no ready-made file covers this place
+        return graph
+
+    monkeypatch.setattr(pipeline, "get_network", slow_area)
+    monkeypatch.setattr(pipeline.ox.distance, "nearest_nodes", lambda graph, X, Y: (2, 1))
+    stages = []
+    get_route("SW1A 1AA", 4, "walk", cache=cache, on_stage=stages.append)
+    assert web.STAGE_FIRST_TIME in stages
+    assert stages.index(web.STAGE_FIRST_TIME) < stages.index("Choosing hexagons")
+    assert "1 to 3 minutes" in web.STAGE_FIRST_TIME and "keep this page open" in web.STAGE_FIRST_TIME

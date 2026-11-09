@@ -153,3 +153,37 @@ def test_plan_loop_gives_get_network_a_busy_callback_that_prints_a_status_line(m
     plan_loop("SW1A 1AA", 4, "walk", on_status=messages.append)
     seen["busy"]()
     assert messages[-1] == "Map service is busy, trying again..."
+
+
+def test_plan_loop_passes_the_ready_made_file_notice_on_as_a_status_line(monkeypatch):
+    seen = {}
+
+    def fake(lat, lon, activity, radius_m, on_busy=None, on_notice=None, **kwargs):
+        seen["notice"] = on_notice
+        return _grid()
+
+    monkeypatch.setattr(pipeline, "postcode_to_latlon", lambda postcode: (_LAT, _LON))
+    monkeypatch.setattr(pipeline, "get_network", fake)
+    monkeypatch.setattr(pipeline.ox.distance, "nearest_nodes", lambda graph, X, Y: (2, 1))
+    messages = []
+    plan_loop("SW1A 1AA", 4, "walk", on_status=messages.append)
+    seen["notice"]("a friendly note")
+    assert messages[-1] == "a friendly note"
+
+
+def test_plan_loop_shows_the_first_time_message_as_a_stage_only_when_the_download_is_slow(monkeypatch):
+    seen = {}
+
+    def fake(lat, lon, activity, radius_m, on_busy=None, on_notice=None, on_slow=None, **kwargs):
+        seen["slow"] = on_slow
+        return _grid()
+
+    monkeypatch.setattr(pipeline, "postcode_to_latlon", lambda postcode: (_LAT, _LON))
+    monkeypatch.setattr(pipeline, "get_network", fake)
+    monkeypatch.setattr(pipeline.ox.distance, "nearest_nodes", lambda graph, X, Y: (2, 1))
+    stages, messages = [], []
+    plan_loop("SW1A 1AA", 4, "walk", on_stage=stages.append, on_status=messages.append)
+    assert pipeline.STAGE_FIRST_TIME not in stages  # nothing is said unless the loader asks for it
+    seen["slow"]()
+    assert stages[-1] == messages[-1] == pipeline.STAGE_FIRST_TIME
+    assert stages.index("Loading the streets") < stages.index(pipeline.STAGE_FIRST_TIME)

@@ -254,7 +254,7 @@ def test_a_busy_map_server_shows_the_busy_message_and_no_traceback(monkeypatch):
     at = _plan(_app(), km=5.0)
 
     assert not at.exception and len(at.error) == 1
-    assert at.error[0].value == "The map service is busy right now. Please try again in a minute."
+    assert at.error[0].value == "The map service is busy right now. Please wait a minute and press Plan again."
     assert not at.metric
 
 
@@ -270,3 +270,105 @@ def test_the_busy_retry_message_is_shown_while_waiting_and_the_route_still_arriv
     assert not at.exception and not at.error and at.metric
     steps = " ".join(str(w.value) for w in at.status[0].markdown)
     assert "Map service is busy, trying again..." in steps
+
+
+# --- the paste-the-whole-block box -------------------------------------------------------
+
+NOTHING_FOUND = "I couldn't find any cell IDs in that text. Check you copied the whole page block."
+OUTSIDE = "Some claimed cells are outside this area, so they won't affect this route."
+
+
+def _plan_with_paste(at, pasted, claimed=""):
+    at.text_input[0].set_value("SW1A 1AA")
+    at.text_area[0].set_value(claimed)
+    at.text_area[1].set_value(pasted)
+    at.number_input[0].set_value(4.0)
+    at.button_group[0].set_value("walk")
+    at.button[0].click().run()
+    return at
+
+
+def _block(*cells):
+    listed = ", ".join(f'"{c}"' for c in cells)
+    return '{"teams": [{"cells": ["8aaaaaaaaaaaaaa"]}], "cells": [%s], "activities": []}' % listed
+
+
+def test_there_is_a_second_box_for_the_whole_block():
+    at = _app()
+    assert len(at.text_area) == 2 and at.text_area[1].value == ""
+    assert "whole block" in at.text_area[1].label
+
+
+def test_a_pasted_block_says_how_many_cells_it_found_and_plans_the_route(stubbed):
+    a, b = sorted(neighbours(HOME_CELL))[:2]
+    at = _plan_with_paste(_app(), _block(a, b, a))  # one repeated
+    assert not at.exception and not at.error
+    assert [i.value for i in at.info] == ["Found 2 claimed cells"]
+    assert at.metric
+    assert "cells already claimed (not counted as new): 2" in [e for e in at.expander if e.label == "Details"][0].code[0].value
+
+
+def test_one_cell_is_not_plural(stubbed):
+    at = _plan_with_paste(_app(), _block(sorted(neighbours(HOME_CELL))[0]))
+    assert [i.value for i in at.info] == ["Found 1 claimed cell"]
+
+
+def test_both_boxes_are_used_together(stubbed):
+    a, b = sorted(neighbours(HOME_CELL))[:2]
+    at = _plan_with_paste(_app(), _block(b), claimed=a)
+    assert not at.error
+    assert "cells already claimed (not counted as new): 2" in [e for e in at.expander if e.label == "Details"][0].code[0].value
+
+
+def test_a_paste_with_no_cells_shows_the_friendly_message_and_does_not_plan(stubbed):
+    at = _plan_with_paste(_app(), "hello, this is not the block")
+    assert not at.exception and [w.value for w in at.warning] == [NOTHING_FOUND]
+    assert not at.metric and not at.error
+
+
+def test_a_good_paste_after_a_bad_one_clears_the_message(stubbed):
+    at = _plan_with_paste(_app(), "nothing here")
+    at = _plan_with_paste(at, _block(sorted(neighbours(HOME_CELL))[0]))
+    assert not at.warning and at.metric
+
+
+def test_the_outside_area_note_shows_only_when_a_claimed_cell_is_far_away(stubbed):
+    import h3
+
+    near = sorted(neighbours(HOME_CELL))[0]
+    quiet = _plan_with_paste(_app(), _block(near))
+    assert OUTSIDE not in [c.value for c in quiet.caption]
+
+    faraway = h3.latlng_to_cell(_LAT + 1.0, _LON, 8)
+    at = _plan_with_paste(_app(), _block(near, faraway))
+    assert not at.exception and at.metric
+    assert OUTSIDE in [c.value for c in at.caption]
+
+
+# --- first-time area message ------------------------------------------------------------------
+
+FIRST_TIME = (
+    "First time planning in this area. Loading the street map can take 1 to 3 minutes, "
+    "so please keep this page open. Central and south London load instantly."
+)
+
+
+def test_a_first_time_area_shows_the_friendly_message_while_loading_and_the_route_still_arrives(stubbed, monkeypatch):
+    graph = _grid()
+
+    def slow_area(lat, lon, activity, radius_m, on_slow=None, **kwargs):
+        on_slow()
+        return graph
+
+    monkeypatch.setattr(pipeline, "get_network", slow_area)
+    at = _plan(_app())
+    assert not at.exception and not at.error and at.metric
+    steps = [str(w.value) for w in at.status[0].markdown]
+    assert f"ℹ️ {FIRST_TIME}" in steps
+    assert not any(step == f"✔ {FIRST_TIME}" for step in steps)  # a warning, not a finished step
+
+
+def test_an_area_with_a_ready_made_file_shows_no_first_time_message(stubbed):
+    at = _plan(_app())
+    steps = " ".join(str(w.value) for w in at.status[0].markdown)
+    assert "First time planning" not in steps

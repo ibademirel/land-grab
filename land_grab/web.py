@@ -3,6 +3,7 @@
 Kept free of Streamlit so it can be tested without it. ``app.py`` is only the screen.
 """
 
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -13,9 +14,14 @@ import requests
 from osmnx._errors import InsufficientResponseError, ResponseStatusCodeError
 
 from land_grab import pipeline
-from land_grab.hexgrid import RESOLUTION, InvalidCellError, parse_cells
+from land_grab.hexgrid import RESOLUTION, InvalidCellError, hexes_within_radius, is_valid_hex, parse_cells
 from land_grab.network import MapServiceBusyError
-from land_grab.pipeline import STAGE_BUSY, InvalidPostcodeError, PlannedLoop  # noqa: F401  (app.py imports STAGE_BUSY from here)
+from land_grab.pipeline import (  # noqa: F401  (app.py imports the STAGE_ names from here)
+    STAGE_BUSY,
+    STAGE_FIRST_TIME,
+    InvalidPostcodeError,
+    PlannedLoop,
+)
 from land_grab.planner import SKIPPED, format_choice
 from land_grab.router import LoopNotFoundError
 
@@ -30,6 +36,7 @@ ACTIVITIES = ("run", "walk", "ride")
 MAX_KM = {"run": 10.0, "walk": 10.0, "ride": 15.0}
 CACHE_SIZE = 64  # finished routes kept; the oldest unused one goes first
 STAGE_MAP = "Drawing your map"
+BUSY_FAILED_MESSAGE = "The map service is busy right now. Please wait a minute and press Plan again."
 
 RouteKey = tuple[str, float, str, frozenset]  # (postcode without spaces, uppercase; km; activity; claimed cells)
 
@@ -56,6 +63,45 @@ def check_distance(km: float, activity: str) -> None:
             f"{activity.strip().lower()}. Try {limit:g} km or less. "
             "(The command line version has no limit.)"
         )
+
+
+# --- the whole data block copied from the challenge page ---------------------------------
+
+_CELLS_LIST = re.compile(r"""["']?\bcells\b["']?\s*[:=]\s*\[([^\]]*)""", re.IGNORECASE)  # everything up to the closing ]
+_CELL_CODE = re.compile(r"(?<![0-9a-z])8[0-9a-f]{14}(?![0-9a-z])", re.IGNORECASE)  # 15 hex characters, the first is 8
+
+
+def cells_from_block(text: str | None) -> list[str]:
+    """Pick the claimed cell codes out of a whole pasted data block, ignoring everything else.
+
+    Only the list under the "cells" key is read (the text from its opening bracket to the
+    closing one), so teams, activities, regions and any other codes are ignored. If "cells"
+    appears more than once, the one that is least nested is used (the block's own, not one
+    inside a team). Repeats are removed and the order is kept. Returns [] when nothing is found.
+    """
+    text = text or ""
+    matches = list(_CELLS_LIST.finditer(text))
+    if not matches:
+        return []
+
+    def nesting(match: re.Match) -> int:
+        before = text[: match.start()]
+        return before.count("{") + before.count("[") - before.count("}") - before.count("]")
+
+    best = min(matches, key=nesting)  # min keeps the first of equals
+    codes = dict.fromkeys(code.lower() for code in _CELL_CODE.findall(best.group(1)))
+    return [code for code in codes if is_valid_hex(code)]
+
+
+def join_claimed(typed: str | None, block: str | None) -> str:
+    """The one claimed-cells text the planner gets: the single-line box plus the cells found in the pasted block."""
+    return ", ".join(part for part in [(typed or "").strip(), ", ".join(cells_from_block(block))] if part)
+
+
+def cells_outside_area(loop: PlannedLoop) -> frozenset:
+    """Claimed cells that lie beyond the streets we loaded around the start, so they cannot touch this route."""
+    lat, lon = loop.start
+    return frozenset(loop.claimed - hexes_within_radius(lat, lon, loop.radius_m))
 
 
 @dataclass(frozen=True)
@@ -171,7 +217,7 @@ def friendly_error(error: Exception, postcode: str = "") -> str:
     # OSMnx's "the server answered with an error" is a kind of ValueError, so these two must come
     # before the ValueError case below, which is only meant for a bad distance.
     if isinstance(error, (MapServiceBusyError, ResponseStatusCodeError)):
-        return "The map service is busy right now. Please try again in a minute."
+        return BUSY_FAILED_MESSAGE
     if isinstance(error, InsufficientResponseError):
         return "The map service didn't send back any streets for that place. Please try again in a minute."
     if isinstance(error, requests.RequestException):

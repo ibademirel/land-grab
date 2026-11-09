@@ -8,9 +8,22 @@ finished routes, the plain-English errors) is in ``land_grab/web.py``.
 
 import streamlit as st
 
-from land_grab.web import ACTIVITIES, MAX_KM, STAGE_BUSY, details_text, friendly_error, get_route
+from land_grab.web import (
+    ACTIVITIES,
+    MAX_KM,
+    STAGE_BUSY,
+    STAGE_FIRST_TIME,
+    cells_from_block,
+    cells_outside_area,
+    details_text,
+    friendly_error,
+    get_route,
+    join_claimed,
+)
 
 ACTIVITY_LABELS = {"run": "🏃 Run", "walk": "🚶 Walk", "ride": "🚴 Ride"}
+NOTHING_FOUND = "I couldn't find any cell IDs in that text. Check you copied the whole page block."
+OUTSIDE_NOTE = "Some claimed cells are outside this area, so they won't affect this route."
 MAP_HEIGHT_PX = 560  # the CSS below makes it taller on big screens and keeps it on-screen on phones
 
 CSS = """
@@ -80,7 +93,8 @@ def plan(postcode: str, km: float, activity: str, claimed: str = "") -> None:
 
         def stage(name: str) -> None:
             status.update(label=name)
-            st.write(f"⏳ {name}" if name == STAGE_BUSY else f"✔ {name}")  # a retry is not a finished step
+            # A retry, or a warning that a slow part is coming, is not a finished step: no tick.
+            st.write(f"⏳ {name}" if name == STAGE_BUSY else f"ℹ️ {name}" if name == STAGE_FIRST_TIME else f"✔ {name}")
 
         try:
             result, from_cache = get_route(postcode, km, activity, claimed, on_stage=stage)
@@ -127,15 +141,37 @@ with st.form("route_form", border=True):
     claimed = st.text_area(
         "Cells already claimed (yours or rivals'), optional",
         value="",
-        placeholder="H3 cell IDs separated by commas, for example 88194ad147fffff, 88194ad141fffff",
+        placeholder="Cell codes separated by commas, for example 88194ad147fffff, 88194ad141fffff",
         help="Paste the cell IDs from the challenge map, whether you or a rival own them. "
         "They show in purple, are not counted as new, and the route avoids them where it can.",
         height=100,
     )
+    pasted = st.text_area(
+        "Or paste the whole block copied from the challenge page, optional",
+        value="",
+        placeholder="Paste everything you copied. We only pick out the claimed cells and ignore the rest.",
+        help="Copy the whole data block from the challenge page and paste it here. "
+        "We only use the list of claimed cells; teams, activities and regions are ignored. "
+        "Anything in the box above is used as well.",
+        height=100,
+    )
+    found_note = st.empty()  # "Found 2 claimed cells" appears here, under the box
     submitted = st.form_submit_button("Plan my route", type="primary")
 
 if submitted:
-    plan(postcode, float(km), activity or "run", claimed)
+    st.session_state.pop("found_note", None)
+    pasted_cells = cells_from_block(pasted)
+    if pasted_cells:
+        count = len(pasted_cells)
+        st.session_state["found_note"] = ("info", f"Found {count} claimed cell{'' if count == 1 else 's'}")
+    elif pasted.strip():
+        st.session_state["found_note"] = ("warning", NOTHING_FOUND)
+    if pasted_cells or not pasted.strip():  # a paste we could not read stops here, so you can fix it
+        plan(postcode, float(km), activity or "run", join_claimed(claimed, pasted))
+
+if "found_note" in st.session_state:
+    kind, message = st.session_state["found_note"]
+    getattr(found_note, kind)(message)
 
 if "error" in st.session_state and "result" not in st.session_state:
     show_error(*st.session_state["error"])
@@ -147,6 +183,9 @@ if "result" in st.session_state:
         hexagons_col, distance_col = st.columns(2)
         hexagons_col.metric("Hexagons", f"{result.hexagons} hexagons = {result.hexagons} points")
         distance_col.metric("Distance", f"{result.distance_km:.1f} km")
+
+    if cells_outside_area(result.loop):
+        st.caption(OUTSIDE_NOTE)
 
     for problem in result.loop.problems:
         st.warning(str(problem))
