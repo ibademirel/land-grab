@@ -1,0 +1,4 @@
+# For working on the project on your own computer: the app's packages plus the test runner.
+# Install with:  .venv/bin/python -m pip install -r requirements-dev.txt
+-r requirements.txt
+pytest==9.2.0

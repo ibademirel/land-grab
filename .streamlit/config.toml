@@ -1,0 +1,18 @@
+# A calm light theme (soft teal on warm off-white), and no Streamlit menu or toolbar.
+
+[theme]
+base = "light"
+primaryColor = "#2a7f8e"
+backgroundColor = "#f6f9f8"
+secondaryBackgroundColor = "#e3eeee"
+textColor = "#1f3a44"
+font = "sans serif"
+baseRadius = "large"
+buttonRadius = "large"
+
+[client]
+toolbarMode = "minimal"   # hides the menu and the Deploy button
+showErrorDetails = "none" # people see our friendly messages, not tracebacks
+
+[browser]
+gatherUsageStats = false
