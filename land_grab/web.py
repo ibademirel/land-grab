@@ -10,10 +10,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import requests
+from osmnx._errors import InsufficientResponseError, ResponseStatusCodeError
 
 from land_grab import pipeline
 from land_grab.hexgrid import RESOLUTION, InvalidCellError, parse_cells
-from land_grab.pipeline import InvalidPostcodeError, PlannedLoop
+from land_grab.network import MapServiceBusyError
+from land_grab.pipeline import STAGE_BUSY, InvalidPostcodeError, PlannedLoop  # noqa: F401  (app.py imports STAGE_BUSY from here)
 from land_grab.planner import SKIPPED, format_choice
 from land_grab.router import LoopNotFoundError
 
@@ -166,6 +168,12 @@ def friendly_error(error: Exception, postcode: str = "") -> str:
         return f"Sorry, we couldn't find the postcode \"{postcode.strip()}\". Check it and try again, for example SW1A 1AA."
     if isinstance(error, LoopNotFoundError):
         return "We couldn't find a route of that length from there. Try a different distance or another postcode."
+    # OSMnx's "the server answered with an error" is a kind of ValueError, so these two must come
+    # before the ValueError case below, which is only meant for a bad distance.
+    if isinstance(error, (MapServiceBusyError, ResponseStatusCodeError)):
+        return "The map service is busy right now. Please try again in a minute."
+    if isinstance(error, InsufficientResponseError):
+        return "The map service didn't send back any streets for that place. Please try again in a minute."
     if isinstance(error, requests.RequestException):
         return "We couldn't reach the postcode or map service. Check your internet connection and try again."
     if isinstance(error, ValueError):

@@ -8,7 +8,7 @@ finished routes, the plain-English errors) is in ``land_grab/web.py``.
 
 import streamlit as st
 
-from land_grab.web import ACTIVITIES, MAX_KM, details_text, friendly_error, get_route
+from land_grab.web import ACTIVITIES, MAX_KM, STAGE_BUSY, details_text, friendly_error, get_route
 
 ACTIVITY_LABELS = {"run": "🏃 Run", "walk": "🚶 Walk", "ride": "🚴 Ride"}
 MAP_HEIGHT_PX = 560  # the CSS below makes it taller on big screens and keeps it on-screen on phones
@@ -80,7 +80,7 @@ def plan(postcode: str, km: float, activity: str, claimed: str = "") -> None:
 
         def stage(name: str) -> None:
             status.update(label=name)
-            st.write(f"✔ {name}")
+            st.write(f"⏳ {name}" if name == STAGE_BUSY else f"✔ {name}")  # a retry is not a finished step
 
         try:
             result, from_cache = get_route(postcode, km, activity, claimed, on_stage=stage)

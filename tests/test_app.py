@@ -238,3 +238,35 @@ def test_gitignore_hides_local_files_but_keeps_the_app():
     for kept in ("app.py", "land_grab", "tests", "requirements.txt", ".streamlit", "config.toml"):
         assert kept not in (p.strip("/") for p in patterns), kept  # (".streamlit/secrets.toml" alone is fine)
     assert ".streamlit/config.toml" not in patterns and ".streamlit/*" not in patterns
+
+
+# --- a busy map server -------------------------------------------------------------------
+
+
+def test_a_busy_map_server_shows_the_busy_message_and_no_traceback(monkeypatch):
+    from osmnx._errors import ResponseStatusCodeError
+
+    def busy(*args, **kwargs):
+        raise ResponseStatusCodeError("'overpass-api.de' responded: 502 Bad Gateway ... at capacity")
+
+    monkeypatch.setattr(pipeline, "postcode_to_latlon", lambda postcode: (_LAT, _LON))
+    monkeypatch.setattr(pipeline, "get_network", busy)
+    at = _plan(_app(), km=5.0)
+
+    assert not at.exception and len(at.error) == 1
+    assert at.error[0].value == "The map service is busy right now. Please try again in a minute."
+    assert not at.metric
+
+
+def test_the_busy_retry_message_is_shown_while_waiting_and_the_route_still_arrives(stubbed, monkeypatch):
+    graph = _grid()
+
+    def slow(lat, lon, activity, radius_m, on_busy=None, **kwargs):
+        on_busy()
+        return graph
+
+    monkeypatch.setattr(pipeline, "get_network", slow)
+    at = _plan(_app())
+    assert not at.exception and not at.error and at.metric
+    steps = " ".join(str(w.value) for w in at.status[0].markdown)
+    assert "Map service is busy, trying again..." in steps

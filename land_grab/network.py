@@ -3,10 +3,14 @@
 import os
 import pickle
 import tempfile
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import networkx as nx
 import osmnx as ox
+import requests
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -33,6 +37,86 @@ def usable_cache_dir(preferred: Path = PROJECT_DIR / "cache") -> Path:
 CACHE_DIR = usable_cache_dir()
 ox.settings.cache_folder = str(CACHE_DIR)  # OSMnx keeps its own downloaded answers here
 ox.settings.use_cache = True
+
+# --- a busy map server -------------------------------------------------------------------
+# OpenStreetMap's street data comes from free public "Overpass" servers, which are often busy.
+
+BUSY_MESSAGE = "Map service is busy, trying again..."
+BUSY_STATUS_CODES = frozenset({429, 502, 503, 504})  # too many requests, bad gateway, unavailable, timed out
+RETRY_WAITS_S = (5, 15, 30)  # the first server is retried 3 times, waiting longer each time
+
+# Public servers, tried in this order. (overpass.kumi.systems is now overpass.private.coffee, so it is not listed twice.)
+OVERPASS_SERVERS = (
+    "https://overpass-api.de/api",
+    "https://overpass.private.coffee/api",
+    "https://maps.mail.ru/osm/tools/overpass/api",
+)
+
+_download_lock = threading.Lock()  # one street download at a time: kinder to the servers and to the memory
+
+
+class MapServiceBusyError(requests.RequestException):
+    """A map server answered 429, 502, 503 or 504 (the message is for the details box)."""
+
+    def __init__(self, status_code: int, url: str):
+        self.status_code = status_code
+        super().__init__(f"{url.split('/')[2] if '//' in url else url} responded {status_code}: the map service is busy")
+
+
+def _raise_if_busy(response: requests.Response, *args, **kwargs) -> requests.Response:
+    """A requests "response hook": stop at a busy answer, before OSMnx waits 55 s or tries to read it."""
+    if response.status_code in BUSY_STATUS_CODES:
+        raise MapServiceBusyError(response.status_code, response.url or "")
+    return response
+
+
+def download_graph(
+    lat: float,
+    lon: float,
+    network_type: str,
+    radius_m: float,
+    on_busy: Callable[[], None] | None = None,
+    servers: tuple[str, ...] = OVERPASS_SERVERS,
+    waits: tuple[float, ...] = RETRY_WAITS_S,
+) -> nx.MultiDiGraph:
+    """Download the streets, coping with a busy server.
+
+    The first server is tried, then retried once after each wait in ``waits`` if it is busy. If it is
+    still busy, each of the other servers gets one try. A server that cannot be reached at all is skipped
+    straight away. ``on_busy`` is called just before every wait or switch. If every server fails the last
+    busy error is raised (or else the last connection error).
+    """
+    notify = on_busy or (lambda: None)
+    busy_error: Exception | None = None
+    other_error: Exception | None = None
+
+    with _download_lock:
+        old_server, old_kwargs = ox.settings.overpass_url, ox.settings.requests_kwargs
+        kwargs = dict(old_kwargs)
+        kwargs["hooks"] = {"response": [*dict(old_kwargs.get("hooks", {})).get("response", []), _raise_if_busy]}
+        ox.settings.requests_kwargs = kwargs
+        try:
+            for index, server in enumerate(servers):
+                ox.settings.overpass_url = server
+                tries = len(waits) + 1 if index == 0 else 1
+                for attempt in range(tries):
+                    try:
+                        return ox.graph_from_point((lat, lon), dist=radius_m, network_type=network_type)
+                    except MapServiceBusyError as error:
+                        busy_error = error
+                    except (requests.ConnectionError, requests.Timeout) as error:
+                        other_error = error
+                        break  # this server is not answering at all: go to the next one
+                    if attempt < tries - 1:
+                        notify()
+                        time.sleep(waits[attempt])
+                if index < len(servers) - 1:
+                    notify()
+        finally:
+            ox.settings.overpass_url, ox.settings.requests_kwargs = old_server, old_kwargs
+
+    raise busy_error or other_error or MapServiceBusyError(503, "no map server")
+
 
 # Activity -> OSMnx network_type
 NETWORK_TYPES = {
@@ -99,12 +183,16 @@ def get_network(
     activity: str,
     radius_m: float,
     cache_dir: Path = CACHE_DIR,
+    on_busy: Callable[[], None] | None = None,
 ) -> nx.MultiDiGraph:
     """Return the walk/bike street network around a point, without motorways or trunk roads.
 
     "run" and "walk" use OSMnx's "walk" network; "ride" uses "bike". Results are
     cached as a pickle under ``cache_dir`` (default ``./cache``), so repeated
     calls for the same rounded lat/lon, radius and activity don't download again.
+    A busy map server is retried and other servers are tried (``download_graph``), with ``on_busy``
+    called before each wait. A failed download is never saved: the file is only written once the
+    streets have arrived, so the next attempt starts fresh.
     """
     network_type = _network_type(activity)
     path = cache_path(lat, lon, activity, radius_m, cache_dir)
@@ -113,7 +201,7 @@ def get_network(
         with path.open("rb") as f:
             return pickle.load(f)
 
-    graph = ox.graph_from_point((lat, lon), dist=radius_m, network_type=network_type)
+    graph = download_graph(lat, lon, network_type, radius_m, on_busy)
     graph = remove_excluded_roads(graph)
 
     path.parent.mkdir(parents=True, exist_ok=True)

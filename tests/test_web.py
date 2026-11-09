@@ -263,3 +263,58 @@ def test_the_command_line_has_no_distance_limit():
     import inspect
 
     assert "MAX_KM" not in inspect.getsource(pipeline) and "check_distance" not in inspect.getsource(pipeline)
+
+
+# --- a busy map server ---------------------------------------------------------------------
+
+BUSY = "The map service is busy right now. Please try again in a minute."
+
+
+def test_the_overpass_502_error_says_the_map_service_is_busy_not_that_the_distance_is_wrong():
+    from osmnx._errors import ResponseStatusCodeError
+
+    # The exact error the deployed app showed. It is a kind of ValueError, which friendly_error used to
+    # read as "bad distance".
+    assert issubclass(ResponseStatusCodeError, ValueError)
+    error = ResponseStatusCodeError("'overpass-api.de' responded: 502 Bad Gateway The server is probably at capacity")
+    assert friendly_error(error, "SW1A 1AA") == BUSY
+    assert "distance" not in friendly_error(error, "SW1A 1AA")
+
+
+def test_our_own_busy_error_and_an_empty_answer_have_friendly_messages():
+    from osmnx._errors import InsufficientResponseError
+
+    assert friendly_error(web.MapServiceBusyError(429, "https://overpass-api.de/api/interpreter")) == BUSY
+    assert "didn't send back any streets" in friendly_error(InsufficientResponseError("empty"))
+    assert "distance" in friendly_error(ValueError("km must be positive"))  # a genuine bad distance still says so
+
+
+def test_a_busy_map_server_during_planning_is_shown_as_busy_and_is_not_cached(monkeypatch, cache):
+    from osmnx._errors import ResponseStatusCodeError
+
+    monkeypatch.setattr(pipeline, "postcode_to_latlon", lambda postcode: (_LAT, _LON))
+
+    def busy_network(*args, **kwargs):
+        raise ResponseStatusCodeError("'overpass-api.de' responded: 502 Bad Gateway")
+
+    monkeypatch.setattr(pipeline, "get_network", busy_network)
+    with pytest.raises(ResponseStatusCodeError) as caught:
+        get_route("SW1A 1AA", 5, "run", cache=cache)
+    assert friendly_error(caught.value, "SW1A 1AA") == BUSY
+    assert len(cache) == 0
+
+
+def test_the_busy_message_is_passed_on_as_a_progress_stage(monkeypatch, cache):
+    monkeypatch.setattr(pipeline, "postcode_to_latlon", lambda postcode: (_LAT, _LON))
+    graph = _grid()
+
+    def slow_network(lat, lon, activity, radius_m, on_busy=None, **kwargs):
+        on_busy()  # as if the first server was busy and we are about to wait
+        return graph
+
+    monkeypatch.setattr(pipeline, "get_network", slow_network)
+    monkeypatch.setattr(pipeline.ox.distance, "nearest_nodes", lambda graph, X, Y: (2, 1))
+    stages = []
+    get_route("SW1A 1AA", 4, "walk", cache=cache, on_stage=stages.append)
+    assert "Map service is busy, trying again..." in stages
+    assert stages.index("Loading the streets") < stages.index("Map service is busy, trying again...")

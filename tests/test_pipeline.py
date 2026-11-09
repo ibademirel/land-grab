@@ -137,3 +137,19 @@ def test_a_bad_cell_id_is_rejected_before_any_download(monkeypatch):
     monkeypatch.setattr(pipeline, "get_network", fail)
     with pytest.raises(InvalidCellError, match="not-a-cell"):
         plan_loop("SW1A 1AA", 4, claimed="not-a-cell")
+
+
+def test_plan_loop_gives_get_network_a_busy_callback_that_prints_a_status_line(monkeypatch):
+    seen = {}
+
+    def fake(lat, lon, activity, radius_m, on_busy=None, **kwargs):
+        seen["busy"] = on_busy
+        return _grid()
+
+    monkeypatch.setattr(pipeline, "postcode_to_latlon", lambda postcode: (_LAT, _LON))
+    monkeypatch.setattr(pipeline, "get_network", fake)
+    monkeypatch.setattr(pipeline.ox.distance, "nearest_nodes", lambda graph, X, Y: (2, 1))
+    messages = []
+    plan_loop("SW1A 1AA", 4, "walk", on_status=messages.append)
+    seen["busy"]()
+    assert messages[-1] == "Map service is busy, trying again..."

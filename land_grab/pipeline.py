@@ -17,7 +17,7 @@ from land_grab.export import save_gpx
 from land_grab.geo import postcode_to_latlon
 from land_grab.hexgrid import parse_cells
 from land_grab.mapview import draw_map, route_to_latlons
-from land_grab.network import get_network
+from land_grab.network import BUSY_MESSAGE, get_network
 from land_grab.planner import RouteChoice, choose_route, choose_route_fast
 from land_grab.polish import PolishedRoute
 
@@ -28,6 +28,7 @@ MAX_RADIUS_M = 15_000.0  # cap, so a long bike ride does not trigger a huge down
 # Progress stages reported through ``on_stage`` (the planner adds its own in between).
 STAGE_POSTCODE = "Finding your postcode"
 STAGE_STREETS = "Loading the streets"
+STAGE_BUSY = BUSY_MESSAGE  # shown while a busy map server is retried
 
 
 class InvalidPostcodeError(ValueError):
@@ -132,7 +133,12 @@ def plan_loop(
     say(f"network radius: {radius_m / 1000:.2f} km{note}")
 
     stage(STAGE_STREETS)
-    graph = get_network(lat, lon, activity, radius_m)
+
+    def busy() -> None:
+        say(STAGE_BUSY)
+        stage(STAGE_BUSY)
+
+    graph = get_network(lat, lon, activity, radius_m, on_busy=busy)
     start_node = ox.distance.nearest_nodes(graph, X=lon, Y=lat)
 
     options = dict(
